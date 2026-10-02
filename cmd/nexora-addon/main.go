@@ -1,0 +1,133 @@
+// Command nexora-addon checks and signs an addon's manifest.
+//
+//	nexora-addon check  nexora-addon.json      # is it a manifest a panel accepts?
+//	nexora-addon keygen -out addon.key         # a developer key (keep it secret)
+//	nexora-addon sign   -key addon.key nexora-addon.json > signed.json
+//	nexora-addon verify -pub <base64> nexora-addon.json
+//
+// A verified addon is signed with its developer's own key, which the
+// directory at addons.nexora-panel.org vouches for; an official one with
+// Nexora's. The signature covers every field, so any edit means signing
+// again — and the version changes with every release.
+package main
+
+import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"strings"
+
+	"github.com/nexora-vpn/addon-kit/manifest"
+)
+
+func main() {
+	if len(os.Args) < 2 {
+		usage()
+	}
+	cmd, args := os.Args[1], os.Args[2:]
+	switch cmd {
+	case "check":
+		raw := readArg(args)
+		m, err := manifest.Parse(raw)
+		if err != nil {
+			fail("manifest", err)
+		}
+		fmt.Printf("ok: %s %s (api %d)\n", m.Slug, m.Version, m.API)
+	case "keygen":
+		fs := flag.NewFlagSet("keygen", flag.ExitOnError)
+		out := fs.String("out", "addon.key", "where to write the private key")
+		_ = fs.Parse(args)
+		pub, priv, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			fail("keygen", err)
+		}
+		if err := os.WriteFile(*out, []byte(base64.StdEncoding.EncodeToString(priv)+"\n"), 0o600); err != nil {
+			fail("write key", err)
+		}
+		fmt.Printf("private key: %s (keep it out of the repository)\npublic key:  %s\n", *out, base64.StdEncoding.EncodeToString(pub))
+	case "sign":
+		fs := flag.NewFlagSet("sign", flag.ExitOnError)
+		keyPath := fs.String("key", "addon.key", "the private key")
+		dev := fs.Bool("dev", false, "sign with the development key, which only a panel built with -tags addondev trusts")
+		_ = fs.Parse(args)
+		raw := readArg(fs.Args())
+		if _, err := manifest.Parse(raw); err != nil {
+			fail("manifest", err)
+		}
+		priv := manifest.DevPrivateKey()
+		if !*dev {
+			var err error
+			if priv, err = loadKey(*keyPath); err != nil {
+				fail("load key", err)
+			}
+		}
+		signed, err := manifest.Sign(raw, priv)
+		if err != nil {
+			fail("sign", err)
+		}
+		fmt.Println(string(signed))
+	case "verify":
+		fs := flag.NewFlagSet("verify", flag.ExitOnError)
+		pub := fs.String("pub", "", "a developer's public key (base64); Nexora's and the development key are always tried")
+		_ = fs.Parse(args)
+		raw := readArg(fs.Args())
+		keys := []manifest.Key{manifest.NexoraKey(), manifest.DevKey()}
+		if *pub != "" {
+			b, err := base64.StdEncoding.DecodeString(*pub)
+			if err != nil || len(b) != ed25519.PublicKeySize {
+				fail("pub", fmt.Errorf("not a base64 Ed25519 public key"))
+			}
+			keys = append(keys, manifest.Key{Name: "developer", Public: ed25519.PublicKey(b)})
+		}
+		k, err := manifest.Verify(raw, keys)
+		if err != nil {
+			fail("verify", err)
+		}
+		fmt.Printf("signed by: %s\n", k.Name)
+	default:
+		usage()
+	}
+}
+
+func readArg(args []string) []byte {
+	if len(args) != 1 {
+		usage()
+	}
+	var raw []byte
+	var err error
+	if args[0] == "-" {
+		raw, err = io.ReadAll(os.Stdin)
+	} else {
+		raw, err = os.ReadFile(args[0])
+	}
+	if err != nil {
+		fail("read", err)
+	}
+	return raw
+}
+
+func loadKey(path string) (ed25519.PrivateKey, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	b, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(raw)))
+	if err != nil || len(b) != ed25519.PrivateKeySize {
+		return nil, fmt.Errorf("%s is not a base64 Ed25519 private key", path)
+	}
+	return ed25519.PrivateKey(b), nil
+}
+
+func usage() {
+	fmt.Fprintln(os.Stderr, "usage: nexora-addon check|keygen|sign|verify …")
+	os.Exit(2)
+}
+
+func fail(what string, err error) {
+	fmt.Fprintf(os.Stderr, "%s: %v\n", what, err)
+	os.Exit(1)
+}
