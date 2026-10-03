@@ -99,6 +99,10 @@ const (
 	EnvClaimCode = "NEXORA_CLAIM_CODE"
 )
 
+// MaxRateLimit is the most requests a minute a manifest may ask for its
+// token. The panel's default is 120.
+const MaxRateLimit = 600
+
 func checkV1(m Manifest) error {
 	if err := checkLabels("description", m.Description, 500, false); err != nil {
 		return err
@@ -111,6 +115,9 @@ func checkV1(m Manifest) error {
 	}
 	if m.Requires != nil && m.Requires.Panel != "" && !panelReqPattern.MatchString(m.Requires.Panel) {
 		return errors.New(`requires.panel must read ">=X.Y.Z"`)
+	}
+	if m.RateLimit < 0 || m.RateLimit > MaxRateLimit {
+		return fmt.Errorf("rateLimit is requests a minute, from 1 to %d (0 for the panel's default)", MaxRateLimit)
 	}
 	if m.Install == nil {
 		return nil

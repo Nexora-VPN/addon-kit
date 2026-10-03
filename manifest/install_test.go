@@ -31,6 +31,7 @@ const v1Manifest = `{
     ]
   },
   "scopes": [{"scope": "users:write", "purpose": "to create the accounts it sells"}],
+  "rateLimit": 300,
   "setup": "/nexora/setup", "health": "/health", "ui": "/"
 }`
 
@@ -39,7 +40,7 @@ func TestAV1ManifestWithEveryOptionTypeParses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	if m.API != 1 || m.Install == nil || len(m.Install.Options) != 8 || m.Install.Docker.Image != "ghcr.io/nexora-vpn/shop" {
+	if m.API != 1 || m.Install == nil || len(m.Install.Options) != 8 || m.Install.Docker.Image != "ghcr.io/nexora-vpn/shop" || m.RateLimit != 300 {
 		t.Fatalf("manifest = %+v", m)
 	}
 	if got := addon.EnvName("database_dsn"); got != "NEXORA_OPT_DATABASE_DSN" {
@@ -67,6 +68,8 @@ func TestAMalformedV1ManifestNamesTheField(t *testing.T) {
 		{"unknown language", `"fa": "فروش و تمدید حساب"`, `"de": "Verkauf"`, "description"},
 		{"duplicate key", `"key": "trial_days"`, `"key": "port"`, "install.options.port is declared twice"},
 		{"api 2", `"api": 1`, `"api": 2`, "api 2"},
+		{"rate limit past the ceiling", `"rateLimit": 300`, `"rateLimit": 601`, "rateLimit"},
+		{"negative rate limit", `"rateLimit": 300`, `"rateLimit": -1`, "rateLimit"},
 	}
 	for _, c := range cases {
 		raw := strings.Replace(v1Manifest, c.from, c.to, 1)
@@ -91,6 +94,10 @@ func TestAnAPI0ManifestStaysValidAndStaysV0(t *testing.T) {
 	mixed := strings.Replace(v0, `"setup": "/setup"`, `"setup": "/setup", "install": {"binary": {"linux-amd64": "a.tgz"}}`, 1)
 	if _, err := addon.Parse([]byte(mixed)); err == nil || !strings.Contains(err.Error(), "api 1 fields") {
 		t.Fatalf("api 0 with an install section: %v", err)
+	}
+	rated := strings.Replace(v0, `"setup": "/setup"`, `"setup": "/setup", "rateLimit": 300`, 1)
+	if _, err := addon.Parse([]byte(rated)); err == nil || !strings.Contains(err.Error(), "api 1 fields") {
+		t.Fatalf("api 0 with a rate limit: %v", err)
 	}
 }
 

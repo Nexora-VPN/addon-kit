@@ -40,6 +40,7 @@ release of Nexora Shop, when it is frozen.
 | `docs` | v1 | an absolute http(s) URL |
 | `requires.panel` | v1 | `">=X.Y.Z"`; a panel older than that refuses the addon and says why |
 | `install` | v1 | how it is installed, below; an addon without one can only be registered by its address |
+| `rateLimit` | v1 | requests a minute the token may make, 1–600; absent is the panel's default, 120. Shown on the consent screen; a newer manifest asking more waits for approval |
 | `signature` | | base64 Ed25519 |
 
 ## `install`

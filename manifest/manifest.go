@@ -85,6 +85,11 @@ type Manifest struct {
 	Docs        string            `json:"docs,omitempty"`
 	Requires    *Requires         `json:"requires,omitempty"`
 	Install     *Install          `json:"install,omitempty"`
+	// RateLimit is the requests a minute the addon's token may make, from 1
+	// to MaxRateLimit; 0 is the panel's default (120). Shown on the consent
+	// screen, and a newer manifest asking more waits for approval like a
+	// new scope.
+	RateLimit int `json:"rateLimit,omitempty"`
 
 	// Signature is the Ed25519 signature over everything else (see
 	// SigningPayload), base64.
@@ -93,7 +98,8 @@ type Manifest struct {
 
 // v1Only reports whether a manifest uses a field api 0 does not have.
 func (m Manifest) v1Only() bool {
-	return len(m.Description) > 0 || m.License != "" || m.Paid || m.Docs != "" || m.Requires != nil || m.Install != nil
+	return len(m.Description) > 0 || m.License != "" || m.Paid || m.Docs != "" || m.Requires != nil || m.Install != nil ||
+		m.RateLimit != 0
 }
 
 // Parse decodes and checks a manifest's shape. The panel's own vocabulary —
@@ -120,7 +126,7 @@ func (m Manifest) Check() error {
 	case !slices.Contains(APIs, m.API):
 		return fmt.Errorf("the manifest speaks api %d; this panel speaks api 0 and 1 — update the panel", m.API)
 	case m.API == 0 && m.v1Only():
-		return errors.New("the manifest says api 0 but uses api 1 fields (description, license, paid, docs, requires, install)")
+		return errors.New("the manifest says api 0 but uses api 1 fields (description, license, paid, docs, requires, install, rateLimit)")
 	case !ValidSlug(m.Slug):
 		return errors.New("slug must be a short lowercase id (a-z, 0-9, _ and -, at most 32)")
 	case strings.TrimSpace(m.Name) == "" || len(m.Name) > 64:
@@ -230,6 +236,11 @@ type SetupPanel struct {
 	// ID names the panel install, stable across address changes; absent
 	// from panels that predate it.
 	ID string `json:"id,omitempty"`
+	// PublicURL is the address the operator gave the panel for people to
+	// use — its public address setting, with the panel's base path — which
+	// URL is not when the admin's browser reached the panel by another name.
+	// Absent when no public address is set.
+	PublicURL string `json:"publicUrl,omitempty"`
 }
 
 // SetupWebhook is the subscription made for the addon.
