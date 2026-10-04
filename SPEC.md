@@ -62,6 +62,31 @@ release of Nexora Shop, when it is frozen.
   systemd (`--method script`).
 - At least one of the two.
 
+### The release's checksums, signed
+
+A release publishes **`SHA256SUMS`** — every asset, `install.sh` and the
+binaries among them, as `sha256sum` writes it — and **`SHA256SUMS.sig`**,
+the signature over it made with **the key that signs the manifest**, after
+the build:
+
+```sh
+nexora-addon sign-sums -key addon.key SHA256SUMS > SHA256SUMS.sig
+gh release upload v1.2.3 SHA256SUMS.sig
+```
+
+The signature is the base64 Ed25519 signature of `nexora-addon SHA256SUMS
+v1\n` followed by the file's bytes (`manifest.SignSums`, `VerifySums`), so
+it can never pass for a manifest's. The panel installs, updates or removes
+an addon over SSH only when the release's `install.sh` — and, for a
+script install, its binary — match a `SHA256SUMS` that the key which signed
+the release's manifest signed; a release without `SHA256SUMS.sig` is
+installed by its command. A script install the host downloads itself
+(`source: host`) is handed the binary's checksum as `--sha256`, which the
+install script checks. A Docker install's image is pulled by its tag and is
+not covered. The manifest names no digest itself: an addon embeds its
+manifest in its binary, so the binary's digest cannot be in it. (Panels
+from GA-S10 on; before, only the unsigned `SHA256SUMS` was read.)
+
 ## `install.options`
 
 The questions the install asks, at most 32, in the order shown:

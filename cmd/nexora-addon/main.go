@@ -4,11 +4,18 @@
 //	nexora-addon keygen -out addon.key         # a developer key (keep it secret)
 //	nexora-addon sign   -key addon.key nexora-addon.json > signed.json
 //	nexora-addon verify -pub <base64> nexora-addon.json
+//	nexora-addon sign-sums   -key addon.key SHA256SUMS > SHA256SUMS.sig
+//	nexora-addon verify-sums -pub <base64> SHA256SUMS SHA256SUMS.sig
 //
 // A verified addon is signed with its developer's own key, which the
 // directory at addons.nexora-panel.org vouches for; an official one with
 // Nexora's. The signature covers every field, so any edit means signing
 // again — and the version changes with every release.
+//
+// A release's SHA256SUMS is signed with the same key, after the build, and
+// SHA256SUMS.sig uploaded beside it: the panel runs a release's install.sh,
+// or installs its binary, only when both match checksums the manifest's key
+// signed.
 package main
 
 import (
@@ -85,15 +92,44 @@ func main() {
 		pub := fs.String("pub", "", "a developer's public key (base64); Nexora's and the development key are always tried")
 		_ = fs.Parse(args)
 		raw := readArg(fs.Args())
-		keys := []manifest.Key{manifest.NexoraKey(), manifest.DevKey()}
-		if *pub != "" {
-			b, err := base64.StdEncoding.DecodeString(*pub)
-			if err != nil || len(b) != ed25519.PublicKeySize {
-				fail("pub", fmt.Errorf("not a base64 Ed25519 public key"))
-			}
-			keys = append(keys, manifest.Key{Name: "developer", Public: ed25519.PublicKey(b)})
+		k, err := manifest.Verify(raw, keysWith(*pub))
+		if err != nil {
+			fail("verify", err)
 		}
-		k, err := manifest.Verify(raw, keys)
+		fmt.Printf("signed by: %s\n", k.Name)
+	case "sign-sums":
+		fs := flag.NewFlagSet("sign-sums", flag.ExitOnError)
+		keyPath := fs.String("key", "addon.key", "the private key — the one that signs the manifest")
+		dev := fs.Bool("dev", false, "sign with the development key, which only a panel built with -tags addondev trusts")
+		_ = fs.Parse(args)
+		sums := readArg(fs.Args())
+		if _, err := manifest.ParseSums(sums); err != nil {
+			fail("SHA256SUMS", err)
+		}
+		priv := manifest.DevPrivateKey()
+		if !*dev {
+			var err error
+			if priv, err = loadKey(*keyPath); err != nil {
+				fail("load key", err)
+			}
+		}
+		_, _ = os.Stdout.Write(manifest.SignSums(sums, priv))
+	case "verify-sums":
+		fs := flag.NewFlagSet("verify-sums", flag.ExitOnError)
+		pub := fs.String("pub", "", "a developer's public key (base64); Nexora's and the development key are always tried")
+		_ = fs.Parse(args)
+		if fs.NArg() != 2 {
+			usage()
+		}
+		sums, err := os.ReadFile(fs.Arg(0))
+		if err != nil {
+			fail("read", err)
+		}
+		sig, err := os.ReadFile(fs.Arg(1))
+		if err != nil {
+			fail("read", err)
+		}
+		k, err := manifest.VerifySums(sums, sig, keysWith(*pub))
 		if err != nil {
 			fail("verify", err)
 		}
@@ -101,6 +137,20 @@ func main() {
 	default:
 		usage()
 	}
+}
+
+// keysWith is Nexora's key, the development key and, when given, a
+// developer's base64 public key.
+func keysWith(pub string) []manifest.Key {
+	keys := []manifest.Key{manifest.NexoraKey(), manifest.DevKey()}
+	if pub != "" {
+		b, err := base64.StdEncoding.DecodeString(pub)
+		if err != nil || len(b) != ed25519.PublicKeySize {
+			fail("pub", fmt.Errorf("not a base64 Ed25519 public key"))
+		}
+		keys = append(keys, manifest.Key{Name: "developer", Public: ed25519.PublicKey(b)})
+	}
+	return keys
 }
 
 func readArg(args []string) []byte {
@@ -133,7 +183,7 @@ func loadKey(path string) (ed25519.PrivateKey, error) {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: nexora-addon check|keygen|sign|verify …")
+	fmt.Fprintln(os.Stderr, "usage: nexora-addon check|keygen|sign|verify|sign-sums|verify-sums …")
 	os.Exit(2)
 }
 
