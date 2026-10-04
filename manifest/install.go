@@ -74,9 +74,34 @@ const (
 	OptionBool   = "bool"
 	OptionChoice = "choice"
 	OptionURL    = "url"
+	// OptionPath is a base path the addon serves its admin under: one
+	// segment, or "" for the root (NormalizeBasePath). The panel's install
+	// wizard proposes a random one when the option has no default, and
+	// joins the answer into the address it registers the addon at, as it
+	// does the port. At most one per manifest.
+	OptionPath = "path"
 )
 
-var optionTypes = []string{OptionString, OptionSecret, OptionNumber, OptionPort, OptionBool, OptionChoice, OptionURL}
+var optionTypes = []string{OptionString, OptionSecret, OptionNumber, OptionPort, OptionBool, OptionChoice, OptionURL, OptionPath}
+
+// basePathPattern is one base-path segment, the rule the panel holds its own
+// base path to: mounted verbatim as a URL prefix, so nothing that would need
+// escaping.
+var basePathPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`)
+
+// NormalizeBasePath reads a base path as an operator may type it — "admin",
+// "/admin", "/admin/", or "" and "/" for the root — and answers "/admin", or
+// "" for the root.
+func NormalizeBasePath(s string) (string, error) {
+	s = strings.Trim(strings.TrimSpace(s), "/")
+	if s == "" {
+		return "", nil
+	}
+	if !basePathPattern.MatchString(s) {
+		return "", errors.New("must be one path segment of letters, digits, - and _ (at most 64), or empty for the root")
+	}
+	return "/" + s, nil
+}
 
 // Languages are the ones a label may be written in: the panel's four.
 var Languages = []string{"en", "fa", "ru", "zh"}
@@ -150,6 +175,7 @@ func checkOptions(opts []Option) error {
 		return errors.New("install.options: at most 32 options")
 	}
 	declared := map[string]Option{}
+	paths := 0
 	for i, o := range opts {
 		where := fmt.Sprintf("install.options[%d]", i)
 		if !optionKeyPattern.MatchString(o.Key) {
@@ -161,6 +187,11 @@ func checkOptions(opts []Option) error {
 		}
 		if !slices.Contains(optionTypes, o.Type) {
 			return fmt.Errorf("%s: type must be one of %s", where, strings.Join(optionTypes, ", "))
+		}
+		if o.Type == OptionPath {
+			if paths++; paths > 1 {
+				return fmt.Errorf("%s: a manifest has at most one path option", where)
+			}
 		}
 		if err := checkLabels(where+".label", o.Label, 80, true); err != nil {
 			return err
@@ -253,6 +284,10 @@ func checkValue(o Option, raw json.RawMessage) error {
 		case OptionURL:
 			if s != "" && !absoluteHTTP(s) {
 				return errors.New("must be an absolute http(s) URL")
+			}
+		case OptionPath:
+			if _, err := NormalizeBasePath(s); err != nil {
+				return err
 			}
 		}
 	}

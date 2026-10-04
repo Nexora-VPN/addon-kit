@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 
@@ -131,5 +132,58 @@ func TestPathsStayUnderTheBase(t *testing.T) {
 		if addon.ValidPath(bad) {
 			t.Errorf("%q accepted as a path", bad)
 		}
+	}
+}
+
+// TestADuplicateKeyIsRefused: decoding into a map keeps the last of two
+// equal keys and into a struct merges them, so a manifest that names a key
+// twice — at any depth — is refused before it is parsed or verified: nothing
+// can be added beside a signed field without breaking the signature.
+func TestADuplicateKeyIsRefused(t *testing.T) {
+	signed := `{"api":1,"slug":"s","name":"S","setup":"/setup","scopes":[{"scope":"users:read","purpose":"p"}],` +
+		`"install":{"docker":{"image":"evil/img"}},"install":{"binary":{"linux-amd64":"s.tar.gz"}}}`
+	if _, err := addon.Parse([]byte(signed)); err == nil || !strings.Contains(err.Error(), `"install" twice`) {
+		t.Fatalf("Parse = %v", err)
+	}
+	if _, err := addon.SigningPayload([]byte(signed)); err == nil {
+		t.Fatal("SigningPayload took a duplicate key")
+	}
+	nested := `{"api":1,"slug":"s","name":"S","setup":"/setup","scopes":[{"scope":"users:read","purpose":"p","purpose":"q"}]}`
+	if _, err := addon.Parse([]byte(nested)); err == nil {
+		t.Fatal("a duplicate inside an array's object passed")
+	}
+}
+
+// TestPathsTheKitCannotServeAreRefused: a path with route syntax, or two of
+// the manifest's paths on one route, would panic the addon's Mount.
+func TestPathsTheKitCannotServeAreRefused(t *testing.T) {
+	base := `{"api":1,"slug":"s","name":"S","scopes":[{"scope":"users:read","purpose":"p"}],"events":["user.created"],`
+	for _, tail := range []string{
+		`"setup":"/s/{a","webhook":"/hook"}`,
+		`"setup":"/hook","webhook":"/hook"}`,
+		`"setup":"/setup","webhook":"/hook","health":"/.well-known/nexora-addon.json"}`,
+	} {
+		if _, err := addon.Parse([]byte(base + tail)); err == nil {
+			t.Errorf("%s passed", tail)
+		}
+	}
+}
+
+// TestAPathMustBeCleanAndUnescaped: a route with an empty or "." segment can
+// never match, and a %-escape is matched unescaped — so two different
+// strings could be one route.
+func TestAPathMustBeCleanAndUnescaped(t *testing.T) {
+	for _, p := range []string{"/a//b", "/a/./b", "/a/.", "/hoo%6B", "/.well-known/nexora-addon%2Ejson"} {
+		if addon.ValidPath(p) {
+			t.Errorf("ValidPath(%q) took it", p)
+		}
+	}
+	for _, p := range []string{"/", "/a", "/a/b/", "/nexora/setup"} {
+		if !addon.ValidPath(p) {
+			t.Errorf("ValidPath(%q) refused it", p)
+		}
+	}
+	if _, err := addon.Parse([]byte(`{"api":1,"slug":`)); err == nil || !strings.Contains(err.Error(), "not a JSON object") || errors.Is(err, io.EOF) {
+		t.Errorf("a truncated manifest = %v", err)
 	}
 }

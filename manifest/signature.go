@@ -45,6 +45,9 @@ var (
 // signed manifest without breaking it; and the addon may serve it indented
 // or reordered, since the payload is rebuilt from the content.
 func SigningPayload(raw []byte) ([]byte, error) {
+	if err := noDuplicateKeys(raw); err != nil {
+		return nil, err
+	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
 	var doc map[string]any

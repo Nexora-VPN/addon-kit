@@ -27,7 +27,8 @@ const v1Manifest = `{
       {"key": "bot_name", "type": "string", "label": {"en": "Bot name"}, "help": {"en": "Shown to customers"}},
       {"key": "trial_days", "type": "number", "default": 1, "label": {"en": "Trial days"}},
       {"key": "trials", "type": "bool", "default": true, "label": {"en": "Offer trials"}},
-      {"key": "trial_volume", "type": "number", "when": {"trials": "true"}, "label": {"en": "Trial volume (GB)"}}
+      {"key": "trial_volume", "type": "number", "when": {"trials": "true"}, "label": {"en": "Trial volume (GB)"}},
+      {"key": "base_path", "type": "path", "label": {"en": "Admin path"}}
     ]
   },
   "scopes": [{"scope": "users:write", "purpose": "to create the accounts it sells"}],
@@ -40,7 +41,7 @@ func TestAV1ManifestWithEveryOptionTypeParses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	if m.API != 1 || m.Install == nil || len(m.Install.Options) != 8 || m.Install.Docker.Image != "ghcr.io/nexora-vpn/shop" || m.RateLimit != 300 {
+	if m.API != 1 || m.Install == nil || len(m.Install.Options) != 9 || m.Install.Docker.Image != "ghcr.io/nexora-vpn/shop" || m.RateLimit != 300 {
 		t.Fatalf("manifest = %+v", m)
 	}
 	if got := addon.EnvName("database_dsn"); got != "NEXORA_OPT_DATABASE_DSN" {
@@ -70,6 +71,8 @@ func TestAMalformedV1ManifestNamesTheField(t *testing.T) {
 		{"api 2", `"api": 1`, `"api": 2`, "api 2"},
 		{"rate limit past the ceiling", `"rateLimit": 300`, `"rateLimit": 601`, "rateLimit"},
 		{"negative rate limit", `"rateLimit": 300`, `"rateLimit": -1`, "rateLimit"},
+		{"two paths", `"key": "bot_name", "type": "string"`, `"key": "bot_name", "type": "path"`, "at most one path option"},
+		{"bad path default", `"type": "path", "label"`, `"type": "path", "default": "a/b", "label"`, "install.options.base_path.default"},
 	}
 	for _, c := range cases {
 		raw := strings.Replace(v1Manifest, c.from, c.to, 1)
@@ -134,10 +137,30 @@ func TestAnswersAreCheckedByType(t *testing.T) {
 		{"trials", `"no"`, false},
 		{"trial_days", `2.5`, true},
 		{"trial_days", `"two"`, false},
+		{"base_path", `"x9k2"`, true},
+		{"base_path", `"/x9k2/"`, true},
+		{"base_path", `""`, true},
+		{"base_path", `"a/b"`, false},
+		{"base_path", `"../x"`, false},
+		{"base_path", `"a b"`, false},
 	} {
 		err := addon.CheckAnswer(opt[c.key], json.RawMessage(c.answer))
 		if (err == nil) != c.ok {
 			t.Errorf("%s = %s: err %v, want ok=%v", c.key, c.answer, err, c.ok)
+		}
+	}
+}
+
+func TestABasePathIsOneSegmentOrTheRoot(t *testing.T) {
+	for in, want := range map[string]string{"": "", "/": "", "admin": "/admin", "/admin/": "/admin", " x_9-Z ": "/x_9-Z"} {
+		got, err := addon.NormalizeBasePath(in)
+		if err != nil || got != want {
+			t.Errorf("NormalizeBasePath(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+	for _, in := range []string{"a/b", "-x", "x.y", strings.Repeat("a", 65), "%2e"} {
+		if _, err := addon.NormalizeBasePath(in); err == nil {
+			t.Errorf("NormalizeBasePath(%q) took it", in)
 		}
 	}
 }

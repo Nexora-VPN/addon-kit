@@ -12,6 +12,7 @@ token, signed webhook events, and the manifest that says what it needs.
 | [`panel`](panel) | A small client for the panel's `/api/v1` with the addon's token, idempotency keys and a 429 wait |
 | [`auth`](auth) | An addon's own admin sign-in: bcrypt passwords, session tokens kept as hashes, a TOTP second factor like the panel's, a limiter for failed attempts |
 | [`telegram`](telegram) | A small Telegram Bot API client — messages, buttons, files, long polling — through the operator's proxy or a Bot API mirror; also Bale, whose Bot API is Telegram's at another address |
+| [`web`](web) | An addon's admin under the install's base path with its public pages outside it, HTTPS for the public address — ACME by TLS-ALPN-01 or a self-signed certificate for an address by IP — and the check that the address reaches this very program |
 | [`cmd/nexora-addon`](cmd/nexora-addon) | `check`, `keygen`, `sign` and `verify` a manifest |
 
 ```go

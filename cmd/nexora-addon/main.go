@@ -45,7 +45,17 @@ func main() {
 		if err != nil {
 			fail("keygen", err)
 		}
-		if err := os.WriteFile(*out, []byte(base64.StdEncoding.EncodeToString(priv)+"\n"), 0o600); err != nil {
+		// Never over an existing key: the directory vouches for it, and a
+		// release signed by a new one is no longer the developer's.
+		f, err := os.OpenFile(*out, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err != nil {
+			fail("write key", err)
+		}
+		_, err = f.WriteString(base64.StdEncoding.EncodeToString(priv) + "\n")
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+		if err != nil {
 			fail("write key", err)
 		}
 		fmt.Printf("private key: %s (keep it out of the repository)\npublic key:  %s\n", *out, base64.StdEncoding.EncodeToString(pub))

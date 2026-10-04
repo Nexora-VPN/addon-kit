@@ -149,3 +149,94 @@ func TestOptionsComeFromTheEnvironment(t *testing.T) {
 		t.Fatalf("claim code = %q", a.ClaimCode())
 	}
 }
+
+// TestAnEventNotTakenIsDeliveredAgain: a handler that fails — or panics —
+// answers 500, and the panel's retry of the same delivery reaches it again
+// instead of being dropped as a repeat; the panel's public address arrives
+// with the credentials.
+func TestAnEventNotTakenIsDeliveredAgain(t *testing.T) {
+	a, srv := start(t, "", nil)
+	body := setupBody("CODE-1")
+	body.Panel.PublicURL = "https://vpn.example/sub"
+	post(t, srv.URL+"/nexora/setup", body, nil)
+	if c := a.Credentials(); c == nil || c.Panel.PublicURL != "https://vpn.example/sub" {
+		t.Fatalf("the public address was not kept: %+v", c)
+	}
+	calls := 0
+	a.OnEventErr(func(addon.Event) error {
+		calls++
+		switch calls {
+		case 1:
+			return errors.New("the database is busy")
+		case 2:
+			panic("a bug")
+		}
+		return nil
+	})
+	ev := []byte(`{"v":1,"id":4,"event":"user.created","time":1,"data":{}}`)
+	send := func() int {
+		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/nexora/events", bytes.NewReader(ev))
+		req.Header.Set("X-Nexora-Signature", addon.Sign("s3cret", time.Now().Unix(), ev))
+		req.Header.Set("X-Nexora-Delivery", "42")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	for i, want := range []int{http.StatusInternalServerError, http.StatusInternalServerError, http.StatusNoContent, http.StatusNoContent} {
+		if code := send(); code != want {
+			t.Fatalf("delivery %d = %d, want %d", i+1, code, want)
+		}
+	}
+	if calls != 3 {
+		t.Fatalf("the handler ran %d times, want 3 (the last send is a repeat)", calls)
+	}
+}
+
+// TestARetryWhileTheFirstAttemptRunsIsNotTaken: the panel gives up on an
+// attempt after seconds and retries; while the first is still handled the
+// retry is answered 503, so if the first then fails the event is not lost.
+func TestARetryWhileTheFirstAttemptRunsIsNotTaken(t *testing.T) {
+	a, srv := start(t, "", nil)
+	post(t, srv.URL+"/nexora/setup", setupBody("CODE-1"), nil)
+	release := make(chan struct{})
+	started := make(chan struct{})
+	calls := 0
+	a.OnEventErr(func(addon.Event) error {
+		calls++
+		if calls == 1 {
+			close(started)
+			<-release
+			return errors.New("the database is busy")
+		}
+		return nil
+	})
+	ev := []byte(`{"v":1,"id":5,"event":"user.created","time":1,"data":{}}`)
+	send := func() int {
+		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/nexora/events", bytes.NewReader(ev))
+		req.Header.Set("X-Nexora-Signature", addon.Sign("s3cret", time.Now().Unix(), ev))
+		req.Header.Set("X-Nexora-Delivery", "77")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Error(err)
+			return 0
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	first := make(chan int)
+	go func() { first <- send() }()
+	<-started
+	if code := send(); code != http.StatusServiceUnavailable {
+		t.Fatalf("a retry while the first runs = %d, want 503", code)
+	}
+	close(release)
+	if code := <-first; code != http.StatusInternalServerError {
+		t.Fatalf("the first attempt = %d, want 500", code)
+	}
+	if code := send(); code != http.StatusNoContent || calls != 2 {
+		t.Fatalf("the next retry = %d after %d calls, want 204 after 2", code, calls)
+	}
+}

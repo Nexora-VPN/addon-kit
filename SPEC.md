@@ -18,7 +18,7 @@ release of Nexora Shop, when it is frozen.
   developer's own key (`nexora-addon keygen` / `sign`), which the
   directory's signed index vouches for. The signature covers every field but
   `signature`, re-encoded with keys sorted, so the file may be indented or
-  reordered freely. An unsigned addon is registered by hand.
+  reordered freely. An unsigned addon is registered by hand. A manifest that names one key twice in any object is refused: a map keeps the last and a struct merges them, so the two would be different documents.
 
 ## Fields
 
@@ -30,8 +30,8 @@ release of Nexora Shop, when it is frozen.
 | `version` | | the release, semver; the directory compares it for update badges |
 | `publisher` | | at most 64 characters |
 | `scopes` | one of scopes/webhook | `[{scope, purpose}]`, the API token's permissions, each with the reason shown on the consent screen |
-| `events`, `webhook` | together | the events the addon hears and the path they are POSTed to |
-| `setup` | yes | the path the credentials are delivered to, with the claim code |
+| `events`, `webhook` | together | the events the addon hears and the path they are POSTed to. Each event is granted by the scope the panel's catalog names for it (`GET /api/events`), and that scope — or its `:write` — must be among `scopes`, or the panel refuses the manifest; `panel.addon_removed` is the exception, since an addon is told of its own removal whatever it holds. (Panels from G0-S5 on; before, an event's scope was not checked.) |
+| `setup` | yes | the path the credentials are delivered to, with the claim code. `setup`, `webhook` and `health` are three different clean paths, none of them the manifest's own: each starts with `/`, has no empty, `.` or `..` segment (a trailing `/` is fine) and none of `? # % { } \` or spaces |
 | `health` | | a path answering 200 when healthy; polled every minute |
 | `ui` | | the entry point: a path or an absolute http(s) URL |
 | `description` | v1 | by language (`en`, `fa`, `ru`, `zh`), English required when given, at most 500 each |
@@ -76,7 +76,7 @@ The questions the install asks, at most 32, in the order shown:
 | Field | Meaning |
 | --- | --- |
 | `key` | `a-z0-9_`, starting with a letter, at most 32; unique |
-| `type` | `string`, `secret`, `number`, `port`, `bool`, `choice`, `url` — the whole list |
+| `type` | `string`, `secret`, `number`, `port`, `bool`, `choice`, `url`, `path` — the whole list |
 | `label` | by language, English required, at most 80 each |
 | `help` | by language, at most 300 each |
 | `default` | a JSON value of the option's type; never on a `secret` |
@@ -89,3 +89,16 @@ Answers reach the addon as **environment variables `NEXORA_OPT_<KEY>`** (an
 beside **`NEXORA_PANEL_URL`** and **`NEXORA_CLAIM_CODE`**, the code the panel
 issued for the install. A `bool` is `true` / `false`, a number in its
 JSON spelling.
+
+A **`path`** is the base path the addon serves its admin under: one segment
+of letters, digits, `-` and `_` (at most 64), with or without slashes, or
+empty for the root; at most one per manifest. The panel's install wizard
+proposes a random one when the option has no `default`, and joins the
+answer into the address it registers the addon at, as it does the `port`;
+a script install draws one when the command gives none. The addon serves
+its admin, its API and the routes the panel calls — the manifest, `setup`,
+the webhook, `health` — under it, and the pages its customers open outside
+it (`web.Mount`). A panel older than the type (before kit v0.3.0) refuses
+such a manifest outright — "type must be one of …" — before it reads
+`requires.panel`; set `requires.panel` all the same, and say in the release
+notes which panel it needs.

@@ -106,6 +106,9 @@ func (m Manifest) v1Only() bool {
 // whether a scope or an event exists — is the caller's to check; this
 // package does not know the catalogs.
 func Parse(raw []byte) (Manifest, error) {
+	if err := noDuplicateKeys(raw); err != nil {
+		return Manifest{}, err
+	}
 	var probe map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &probe); err != nil {
 		return Manifest{}, fmt.Errorf("the manifest is not a JSON object: %w", err)
@@ -142,10 +145,19 @@ func (m Manifest) Check() error {
 	case m.Setup == "":
 		return errors.New("setup is required: it is where the credentials are delivered")
 	}
-	for name, p := range map[string]string{"setup": m.Setup, "webhook": m.Webhook, "health": m.Health} {
-		if p != "" && !ValidPath(p) {
-			return fmt.Errorf("%s must be a path under the addon's address, starting with /", name)
+	served := map[string]string{WellKnownPath: "the manifest's own path"}
+	for _, f := range []struct{ name, path string }{{"setup", m.Setup}, {"webhook", m.Webhook}, {"health", m.Health}} {
+		if f.path == "" {
+			continue
 		}
+		if !ValidPath(f.path) {
+			return fmt.Errorf("%s must be a clean path under the addon's address: starting with /, no empty, . or .. segment, and none of ? # %% { } \\ or spaces", f.name)
+		}
+		// The kit serves each on its own route: two on one path cannot be.
+		if other, taken := served[f.path]; taken {
+			return fmt.Errorf("%s is the same path as %s", f.name, other)
+		}
+		served[f.path] = f.name
 	}
 	if m.UI != "" && !ValidPath(m.UI) && !absoluteHTTP(m.UI) {
 		return errors.New("ui must be a path under the addon's address or an absolute http(s) URL")
@@ -188,11 +200,17 @@ func ValidPath(p string) bool {
 	if !strings.HasPrefix(p, "/") || strings.HasPrefix(p, "//") || len(p) > 512 {
 		return false
 	}
-	if strings.ContainsAny(p, "?#\\ \t\r\n") {
+	// { and } are the route patterns' own syntax, and a %-escape is matched
+	// unescaped: a path with any of them would be a different route from the
+	// one the manifest names, or the same route as another of its paths.
+	if strings.ContainsAny(p, "?#\\ \t\r\n{}%") {
 		return false
 	}
-	for _, seg := range strings.Split(p, "/") {
-		if seg == ".." {
+	// A clean path only: no "." or ".." segment, and no empty one but a
+	// trailing slash — a route with any other can never match.
+	segs := strings.Split(p[1:], "/")
+	for i, seg := range segs {
+		if seg == "." || seg == ".." || (seg == "" && i != len(segs)-1) {
 			return false
 		}
 	}

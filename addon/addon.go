@@ -86,6 +86,11 @@ type Panel struct {
 	Version string `json:"version"`
 	// ID names the panel install, when the panel sends one.
 	ID string `json:"id,omitempty"`
+	// PublicURL is the address the operator gave the panel for people to
+	// use (its public address, with its base path), when one is set. URL
+	// is where the admin's browser reached the panel and is never shown to
+	// an addon's customers.
+	PublicURL string `json:"publicUrl,omitempty"`
 }
 
 // Webhook is the subscription the panel made for the addon.
@@ -117,9 +122,11 @@ type Addon struct {
 
 	mu      sync.Mutex
 	creds   *Credentials
-	onEvent func(Event)
+	onEvent func(Event) error
 	onSetup func(Credentials)
 	seen    map[string]time.Time
+	// running are the deliveries whose handler has not returned yet.
+	running map[string]bool
 }
 
 // New checks the manifest and loads any credentials kept from an earlier run.
@@ -128,7 +135,7 @@ func New(cfg Config) (*Addon, error) {
 	if err != nil {
 		return nil, fmt.Errorf("nexora-addon.json: %w", err)
 	}
-	a := &Addon{cfg: cfg, manifest: m, claim: cfg.ClaimCode, seen: map[string]time.Time{}}
+	a := &Addon{cfg: cfg, manifest: m, claim: cfg.ClaimCode, seen: map[string]time.Time{}, running: map[string]bool{}}
 	if a.cfg.Logf == nil {
 		a.cfg.Logf = log.Printf
 	}
@@ -175,7 +182,21 @@ func (a *Addon) Credentials() *Credentials {
 
 // OnEvent sets the function each verified event is handed to. It runs on the
 // request; a slow handler delays the panel's next delivery to this addon.
+// A handler that can fail should use OnEventErr instead.
 func (a *Addon) OnEvent(f func(Event)) {
+	if f == nil {
+		a.OnEventErr(nil)
+		return
+	}
+	a.OnEventErr(func(ev Event) error { f(ev); return nil })
+}
+
+// OnEventErr is OnEvent for a handler that can fail: an error (or a panic)
+// answers the panel 500, so it delivers the event again, and the delivery
+// is not taken for a repeat when it does. The seen set lives in memory, so
+// a delivery retried across the addon's restart is handed on again: a
+// handler keeps its own effects idempotent.
+func (a *Addon) OnEventErr(f func(Event) error) {
 	a.mu.Lock()
 	a.onEvent = f
 	a.mu.Unlock()
@@ -235,7 +256,7 @@ func (a *Addon) handleSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	creds := &Credentials{
-		API: req.API, Panel: Panel{URL: req.Panel.URL, Version: req.Panel.Version, ID: req.Panel.ID},
+		API: req.API, Panel: Panel{URL: req.Panel.URL, Version: req.Panel.Version, ID: req.Panel.ID, PublicURL: req.Panel.PublicURL},
 		Token: req.Token, Scopes: req.Scopes, ClaimedAt: time.Now().UTC(),
 	}
 	if req.Webhook != nil {
@@ -286,21 +307,61 @@ func (a *Addon) handleEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ev.Delivery = r.Header.Get("X-Nexora-Delivery")
-	if ev.Delivery != "" && a.repeat(ev.Delivery) {
-		w.WriteHeader(http.StatusNoContent)
-		return
+	if ev.Delivery != "" {
+		switch a.claimDelivery(ev.Delivery) {
+		case deliveryDone:
+			w.WriteHeader(http.StatusNoContent)
+			return
+		case deliveryRunning:
+			// The first attempt is still being handled and may yet fail:
+			// this retry is not taken either, so the panel tries again.
+			http.Error(w, "still being handled; try again", http.StatusServiceUnavailable)
+			return
+		}
 	}
-	if onEvent != nil {
-		onEvent(ev)
+	err = a.dispatch(onEvent, ev)
+	if ev.Delivery != "" {
+		a.finishDelivery(ev.Delivery, err == nil)
+	}
+	if err != nil {
+		// Not taken: the panel retries it, and the retry is not a repeat.
+		a.cfg.Logf("nexora: event %s (delivery %s) not taken: %v", ev.Event, ev.Delivery, err)
+		http.Error(w, "not taken; try again", http.StatusInternalServerError)
+		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// repeat reports whether a delivery was already handed on within the skew
-// window — a retry the addon answered but the panel did not hear.
-func (a *Addon) repeat(id string) bool {
+// dispatch hands an event on, turning a panic into an error so the
+// delivery is retried rather than lost.
+func (a *Addon) dispatch(f func(Event) error, ev Event) (err error) {
+	if f == nil {
+		return nil
+	}
+	defer func() {
+		if p := recover(); p != nil {
+			err = fmt.Errorf("the handler panicked: %v", p)
+		}
+	}()
+	return f(ev)
+}
+
+// What claimDelivery found.
+const (
+	deliveryNew = iota
+	deliveryRunning
+	deliveryDone
+)
+
+// claimDelivery marks a delivery as being handled, unless it is being
+// handled already or was handled within the skew window — a retry the addon
+// answered but the panel did not hear.
+func (a *Addon) claimDelivery(id string) int {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.running[id] {
+		return deliveryRunning
+	}
 	now := time.Now()
 	for k, at := range a.seen {
 		if now.Sub(at) > 2*MaxSkew {
@@ -308,10 +369,21 @@ func (a *Addon) repeat(id string) bool {
 		}
 	}
 	if _, ok := a.seen[id]; ok {
-		return true
+		return deliveryDone
 	}
-	a.seen[id] = now
-	return false
+	a.running[id] = true
+	return deliveryNew
+}
+
+// finishDelivery records how a claimed delivery ended: taken, it is seen;
+// not taken, the panel's retry of it is handled afresh.
+func (a *Addon) finishDelivery(id string, taken bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	delete(a.running, id)
+	if taken {
+		a.seen[id] = time.Now()
+	}
 }
 
 const credentialsFile = "nexora-credentials.json"

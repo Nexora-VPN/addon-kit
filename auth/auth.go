@@ -12,8 +12,10 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"net/netip"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/crypto/bcrypt"
 )
@@ -21,13 +23,24 @@ import (
 // MinPassword is the shortest password HashPassword takes.
 const MinPassword = 10
 
-// ErrShortPassword is a password under MinPassword characters.
-var ErrShortPassword = errors.New("a password is at least 10 characters")
+// MaxPasswordBytes is the most bcrypt reads of a password: 72 bytes, which
+// is 72 Latin letters but 36 Persian or Russian ones and 24 Chinese.
+const MaxPasswordBytes = 72
+
+// ErrShortPassword is a password under MinPassword characters;
+// ErrLongPassword one over MaxPasswordBytes bytes.
+var (
+	ErrShortPassword = errors.New("a password is at least 10 characters")
+	ErrLongPassword  = errors.New("a password is at most 72 bytes (about 36 Persian or Russian letters, 24 Chinese)")
+)
 
 // HashPassword is bcrypt at its default cost.
 func HashPassword(p string) (string, error) {
-	if len(p) < MinPassword {
+	if utf8.RuneCountInString(p) < MinPassword {
 		return "", ErrShortPassword
+	}
+	if len(p) > MaxPasswordBytes {
+		return "", ErrLongPassword
 	}
 	h, err := bcrypt.GenerateFromPassword([]byte(p), bcrypt.DefaultCost)
 	return string(h), err
@@ -64,27 +77,43 @@ func ClientAddr(r *http.Request) string {
 }
 
 // Limiter counts failures per key (a client address, say) in a sliding
-// window. The zero value is not usable; make one with NewLimiter.
+// window. The zero value is not usable; make one with NewLimiter. An IPv6
+// address counts as its /64, which one client holds whole.
 type Limiter struct {
 	max    int
 	window time.Duration
 	now    func() time.Time
 
-	mu   sync.Mutex
-	seen map[string][]time.Time
+	mu       sync.Mutex
+	seen     map[string][]time.Time
+	inflight map[string]int
+	// sweepNext is the size at which fail sweeps out aged keys next: twice
+	// what a sweep leaves, so the cost is spread over the failures.
+	sweepNext int
 }
 
 // NewLimiter locks a key out after max failures within window.
 func NewLimiter(max int, window time.Duration) *Limiter {
-	return &Limiter{max: max, window: window, now: time.Now, seen: map[string][]time.Time{}}
+	return &Limiter{max: max, window: window, now: time.Now, seen: map[string][]time.Time{}, inflight: map[string]int{}, sweepNext: sweepAt}
 }
 
-// Locked reports whether key has failed max times within the window,
-// forgetting older failures as it goes.
-func (l *Limiter) Locked(key string) bool {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	cut := l.now().Add(-l.window)
+// sweepAt is how many keys the limiter holds before it drops every key
+// whose failures have all aged out.
+const sweepAt = 1024
+
+// limitKey is the key an address is counted under: an IPv6 address's /64.
+func limitKey(key string) string {
+	if a, err := netip.ParseAddr(key); err == nil && a.Is6() && !a.Is4In6() {
+		if p, err := a.Prefix(64); err == nil {
+			return p.String()
+		}
+	}
+	return key
+}
+
+// recent drops key's failures older than the window and answers how many
+// are left. l.mu is held.
+func (l *Limiter) recent(key string, cut time.Time) int {
 	kept := l.seen[key][:0]
 	for _, at := range l.seen[key] {
 		if at.After(cut) {
@@ -96,12 +125,62 @@ func (l *Limiter) Locked(key string) bool {
 	} else {
 		l.seen[key] = kept
 	}
-	return len(kept) >= l.max
+	return len(kept)
+}
+
+// Locked reports whether key has failed max times within the window,
+// forgetting older failures as it goes.
+func (l *Limiter) Locked(key string) bool {
+	key = limitKey(key)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.recent(key, l.now().Add(-l.window)) >= l.max
+}
+
+// Try is Locked and Fail made one: it reserves an attempt for key, counting
+// the attempts still being checked as failures, so N guesses sent at once
+// get no more than max checked. ok false is locked out. Call done once with
+// whether the attempt failed.
+func (l *Limiter) Try(key string) (done func(failed bool), ok bool) {
+	key = limitKey(key)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.recent(key, l.now().Add(-l.window))+l.inflight[key] >= l.max {
+		return func(bool) {}, false
+	}
+	l.inflight[key]++
+	var once sync.Once
+	return func(failed bool) {
+		once.Do(func() {
+			l.mu.Lock()
+			defer l.mu.Unlock()
+			if l.inflight[key]--; l.inflight[key] <= 0 {
+				delete(l.inflight, key)
+			}
+			if failed {
+				l.fail(key)
+			}
+		})
+	}, true
 }
 
 // Fail records one failure for key.
 func (l *Limiter) Fail(key string) {
+	key = limitKey(key)
 	l.mu.Lock()
-	l.seen[key] = append(l.seen[key], l.now())
+	l.fail(key)
 	l.mu.Unlock()
+}
+
+// fail records a failure and, once the keys have doubled since the last
+// sweep, forgets every key whose failures have all aged out. l.mu is held.
+func (l *Limiter) fail(key string) {
+	l.seen[key] = append(l.seen[key], l.now())
+	if len(l.seen) > l.sweepNext {
+		cut := l.now().Add(-l.window)
+		for k := range l.seen {
+			l.recent(k, cut)
+		}
+		l.sweepNext = max(sweepAt, 2*len(l.seen))
+	}
 }
