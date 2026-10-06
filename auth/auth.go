@@ -17,15 +17,17 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/nexora-vpn/addon-kit/manifest"
 	"golang.org/x/crypto/bcrypt"
 )
 
-// MinPassword is the shortest password HashPassword takes.
-const MinPassword = 10
+// MinPassword is the shortest password HashPassword takes; a manifest's
+// password option holds the install's answer to the same rule.
+const MinPassword = manifest.MinPassword
 
 // MaxPasswordBytes is the most bcrypt reads of a password: 72 bytes, which
 // is 72 Latin letters but 36 Persian or Russian ones and 24 Chinese.
-const MaxPasswordBytes = 72
+const MaxPasswordBytes = manifest.MaxPasswordBytes
 
 // ErrShortPassword is a password under MinPassword characters;
 // ErrLongPassword one over MaxPasswordBytes bytes.

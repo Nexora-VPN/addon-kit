@@ -101,10 +101,10 @@ The questions the install asks, at most 32, in the order shown:
 | Field | Meaning |
 | --- | --- |
 | `key` | `a-z0-9_`, starting with a letter, at most 32; unique |
-| `type` | `string`, `secret`, `number`, `port`, `bool`, `choice`, `url`, `path` — the whole list |
+| `type` | `string`, `secret`, `password`, `number`, `port`, `bool`, `choice`, `url`, `path` — the whole list |
 | `label` | by language, English required, at most 80 each |
 | `help` | by language, at most 300 each |
-| `default` | a JSON value of the option's type; never on a `secret` |
+| `default` | a JSON value of the option's type; never on a `secret` or a `password` |
 | `required` | the install cannot go on without an answer |
 | `choices` | a `choice`'s values, 1–32, each at most 64 |
 | `when` | `{ "<key>": "<value>" }` — shown only while that option, declared **before** this one and a `choice` or `bool`, has that value (`"true"` / `"false"` for a bool) |
@@ -114,6 +114,18 @@ Answers reach the addon as **environment variables `NEXORA_OPT_<KEY>`** (an
 beside **`NEXORA_PANEL_URL`** and **`NEXORA_CLAIM_CODE`**, the code the panel
 issued for the install. A `bool` is `true` / `false`, a number in its
 JSON spelling.
+
+A **`password`** is a `secret` that becomes the addon's admin password: at
+least 10 characters and at most 72 bytes, the rule the kit's sign-in
+(`auth`) holds a password to, so the panel refuses a shorter one in its form
+instead of the addon refusing it once installed.
+
+A new claim code over the data of an earlier install — the addon removed
+without its data, then installed again — is a **new install**: the kit
+drops the earlier registration it kept, so the panel that issued the code
+can register the addon, and `Addon.NewInstall` tells the addon to apply the
+answers it otherwise uses only once (its first admin's password). An update
+or a restart keeps the claim code.
 
 A **`path`** is the base path the addon serves its admin under: one segment
 of letters, digits, `-` and `_` (at most 64), with or without slashes, or

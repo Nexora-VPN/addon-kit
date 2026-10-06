@@ -8,7 +8,7 @@ token, signed webhook events, and the manifest that says what it needs.
 | Package | What it does |
 | --- | --- |
 | [`manifest`](manifest) | The manifest (`nexora-addon.json`), its validation, signature and the setup body — the same code the panel validates with. Spec: [SPEC.md](SPEC.md) |
-| [`addon`](addon) | The running half: serves the manifest, takes the credentials at registration (claim code), verifies the panel's event deliveries, answers the health check, reads the install's answers (`NEXORA_OPT_*`) |
+| [`addon`](addon) | The running half: serves the manifest, takes the credentials at registration (claim code) — and drops an earlier install's when a new one brings another code (`NewInstall`) — verifies the panel's event deliveries, answers the health check, reads the install's answers (`NEXORA_OPT_*`) |
 | [`panel`](panel) | A small client for the panel's `/api/v1` with the addon's token, idempotency keys and a 429 wait |
 | [`auth`](auth) | An addon's own admin sign-in: bcrypt passwords, session tokens kept as hashes, a TOTP second factor like the panel's, a limiter for failed attempts |
 | [`telegram`](telegram) | A small Telegram Bot API client — messages, buttons, files, long polling — through the operator's proxy or a Bot API mirror; also Bale, whose Bot API is Telegram's at another address |

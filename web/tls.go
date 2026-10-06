@@ -39,8 +39,8 @@ const (
 	HTTPSPanel = "panel"
 	// HTTPSACME gets the public address's certificate from an ACME CA (Let's
 	// Encrypt by default) by TLS-ALPN-01, answered on the HTTPS port itself,
-	// so nothing listens on 80; the CA asks on 443, whatever port the
-	// address names.
+	// so nothing listens on 80; the CA asks on 443, so the addon serves on
+	// 443.
 	HTTPSACME = "acme"
 	// HTTPSACMEHTTP is HTTPSACME answering the CA's HTTP-01 check on port 80
 	// (TLS.HTTPListen) as well, for a host whose 443 something else holds;
@@ -49,7 +49,8 @@ const (
 	// HTTPSSelfSigned makes a certificate of its own for the public
 	// address's host — an IP or a domain — for an install without a domain
 	// a CA would sign. Browsers warn; the traffic is encrypted, and the
-	// fingerprint (TLS.Fingerprint) is what the admin compares.
+	// fingerprint (TLS.Fingerprint) is what the admin compares — with the
+	// one the panel shows when it is asked to trust the certificate.
 	HTTPSSelfSigned = "self-signed"
 )
 

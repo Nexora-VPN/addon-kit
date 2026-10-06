@@ -6,6 +6,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -74,6 +76,61 @@ func TestTheCredentialsArriveOnceWithTheClaimCodeAndSurviveARestart(t *testing.T
 	}
 	if c := again.Credentials(); c == nil || c.Token != "tok" || c.Webhook.Secret != "s3cret" || again.ClaimCode() != "" {
 		t.Fatalf("after a restart: %+v", c)
+	}
+}
+
+// An addon removed without its data and installed again gets a new claim
+// code: the earlier registration is dropped, so the panel that issued the
+// code can register it, and the addon is told it is a new install. A
+// restart or an update keeps the claim code, and with it the registration.
+func TestANewClaimCodeIsANewInstall(t *testing.T) {
+	dir := t.TempDir()
+	open := func(code string) *addon.Addon {
+		t.Helper()
+		a, err := addon.New(addon.Config{Manifest: []byte(testManifest), ClaimCode: code, DataDir: dir, Logf: t.Logf})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return a
+	}
+	a, srv := start(t, dir, nil)
+	if a.NewInstall() {
+		t.Fatal("the first run is a new install over nothing")
+	}
+	if code := post(t, srv.URL+"/nexora/setup", setupBody("CODE-1"), nil); code != http.StatusNoContent {
+		t.Fatalf("setup = %d", code)
+	}
+	if again := open("CODE-1"); again.NewInstall() || again.Credentials() == nil {
+		t.Fatalf("a restart with the same code: new=%v, credentials %v", again.NewInstall(), again.Credentials())
+	}
+	fresh := open("CODE-2")
+	if !fresh.NewInstall() || fresh.Credentials() != nil || fresh.ClaimCode() != "CODE-2" {
+		t.Fatalf("another code: new=%v, credentials %v, claim %q", fresh.NewInstall(), fresh.Credentials(), fresh.ClaimCode())
+	}
+	// A restart before it registers is still the new install.
+	if again := open("CODE-2"); !again.NewInstall() || again.Credentials() != nil {
+		t.Fatalf("restarted before registering: new=%v, credentials %v", again.NewInstall(), again.Credentials())
+	}
+	mux := http.NewServeMux()
+	fresh.Mount(mux)
+	srv2 := httptest.NewServer(mux)
+	defer srv2.Close()
+	if code := post(t, srv2.URL+"/nexora/setup", setupBody("CODE-2"), nil); code != http.StatusNoContent {
+		t.Fatalf("the new install's registration = %d", code)
+	}
+	if fresh.NewInstall() {
+		t.Fatal("still a new install once registered")
+	}
+	if after := open("CODE-2"); after.NewInstall() || after.Credentials() == nil {
+		t.Fatalf("its restart: new=%v, credentials %v", after.NewInstall(), after.Credentials())
+	}
+	// Data an older kit wrote has no record: its claim code is taken as
+	// the one it was installed with.
+	if err := os.Remove(filepath.Join(dir, "nexora-claim")); err != nil {
+		t.Fatal(err)
+	}
+	if older := open("CODE-3"); older.NewInstall() || older.Credentials() == nil {
+		t.Fatalf("over an older kit's data: new=%v, credentials %v", older.NewInstall(), older.Credentials())
 	}
 }
 

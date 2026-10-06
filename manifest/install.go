@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"unicode/utf8"
 
 	"golang.org/x/mod/semver"
 )
@@ -80,9 +81,30 @@ const (
 	// joins the answer into the address it registers the addon at, as it
 	// does the port. At most one per manifest.
 	OptionPath = "path"
+	// OptionPassword is a secret that becomes the addon's admin password: at
+	// least MinPassword characters, the rule auth.HashPassword holds a
+	// password to, so the panel refuses a shorter one before the install
+	// runs instead of the addon refusing it after.
+	OptionPassword = "password"
 )
 
-var optionTypes = []string{OptionString, OptionSecret, OptionNumber, OptionPort, OptionBool, OptionChoice, OptionURL, OptionPath}
+// MinPassword and MaxPasswordBytes are the bounds an addon's sign-in holds
+// a password to (auth.MinPassword, auth.MaxPasswordBytes: bcrypt reads 72
+// bytes), and so a password option's answer.
+const (
+	MinPassword      = 10
+	MaxPasswordBytes = 72
+)
+
+// secretType is whether an option's answer is kept from sight: never
+// shown, logged or given a default.
+func secretType(t string) bool { return t == OptionSecret || t == OptionPassword }
+
+// SecretType is secretType for the panel: whether an answer of this type is
+// masked in its form and kept out of logs and the command it shows.
+func SecretType(t string) bool { return secretType(t) }
+
+var optionTypes = []string{OptionString, OptionSecret, OptionPassword, OptionNumber, OptionPort, OptionBool, OptionChoice, OptionURL, OptionPath}
 
 // basePathPattern is one base-path segment, the rule the panel holds its own
 // base path to: mounted verbatim as a URL prefix, so nothing that would need
@@ -214,8 +236,8 @@ func checkOptions(opts []Option) error {
 			return fmt.Errorf("%s: only a choice has choices", where)
 		}
 		if len(o.Default) > 0 {
-			if o.Type == OptionSecret {
-				return fmt.Errorf("%s: a secret has no default", where)
+			if secretType(o.Type) {
+				return fmt.Errorf("%s: a %s has no default", where, o.Type)
 			}
 			if err := checkValue(o, o.Default); err != nil {
 				return fmt.Errorf("%s.default: %w", where, err)
@@ -288,6 +310,15 @@ func checkValue(o Option, raw json.RawMessage) error {
 		case OptionPath:
 			if _, err := NormalizeBasePath(s); err != nil {
 				return err
+			}
+		case OptionPassword:
+			// Empty is no answer, which an optional password may be.
+			switch {
+			case s == "":
+			case utf8.RuneCountInString(s) < MinPassword:
+				return fmt.Errorf("must be at least %d characters", MinPassword)
+			case len(s) > MaxPasswordBytes:
+				return fmt.Errorf("must be at most %d bytes (about 36 Persian or Russian letters, 24 Chinese)", MaxPasswordBytes)
 			}
 		}
 	}

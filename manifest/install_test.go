@@ -28,7 +28,8 @@ const v1Manifest = `{
       {"key": "trial_days", "type": "number", "default": 1, "label": {"en": "Trial days"}},
       {"key": "trials", "type": "bool", "default": true, "label": {"en": "Offer trials"}},
       {"key": "trial_volume", "type": "number", "when": {"trials": "true"}, "label": {"en": "Trial volume (GB)"}},
-      {"key": "base_path", "type": "path", "label": {"en": "Admin path"}}
+      {"key": "base_path", "type": "path", "label": {"en": "Admin path"}},
+      {"key": "admin_password", "type": "password", "required": true, "label": {"en": "Admin password"}}
     ]
   },
   "scopes": [{"scope": "users:write", "purpose": "to create the accounts it sells"}],
@@ -41,7 +42,7 @@ func TestAV1ManifestWithEveryOptionTypeParses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	if m.API != 1 || m.Install == nil || len(m.Install.Options) != 9 || m.Install.Docker.Image != "ghcr.io/nexora-vpn/shop" || m.RateLimit != 300 {
+	if m.API != 1 || m.Install == nil || len(m.Install.Options) != 10 || m.Install.Docker.Image != "ghcr.io/nexora-vpn/shop" || m.RateLimit != 300 {
 		t.Fatalf("manifest = %+v", m)
 	}
 	if got := addon.EnvName("database_dsn"); got != "NEXORA_OPT_DATABASE_DSN" {
@@ -73,6 +74,7 @@ func TestAMalformedV1ManifestNamesTheField(t *testing.T) {
 		{"negative rate limit", `"rateLimit": 300`, `"rateLimit": -1`, "rateLimit"},
 		{"two paths", `"key": "bot_name", "type": "string"`, `"key": "bot_name", "type": "path"`, "at most one path option"},
 		{"bad path default", `"type": "path", "label"`, `"type": "path", "default": "a/b", "label"`, "install.options.base_path.default"},
+		{"password default", `"type": "password", "required": true`, `"type": "password", "default": "long-enough-1", "required": true`, "a password has no default"},
 	}
 	for _, c := range cases {
 		raw := strings.Replace(v1Manifest, c.from, c.to, 1)
@@ -143,6 +145,13 @@ func TestAnswersAreCheckedByType(t *testing.T) {
 		{"base_path", `"a/b"`, false},
 		{"base_path", `"../x"`, false},
 		{"base_path", `"a b"`, false},
+		// A password option holds the install's answer to the rule the
+		// addon's sign-in holds a password to.
+		{"admin_password", `"ten-chars!"`, true},
+		{"admin_password", `"short"`, false},
+		{"admin_password", `"گذرواژه‌ی۱"`, true},
+		{"admin_password", `"` + strings.Repeat("ر", 37) + `"`, false},
+		{"admin_password", `""`, true},
 	} {
 		err := addon.CheckAnswer(opt[c.key], json.RawMessage(c.answer))
 		if (err == nil) != c.ok {

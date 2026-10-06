@@ -18,6 +18,7 @@ package addon
 import (
 	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -120,6 +121,11 @@ type Addon struct {
 	manifest manifest.Manifest
 	claim    string
 
+	// newInstall is whether this run was given another claim code than the
+	// one the addon was registered with: a new install over an earlier
+	// one's data.
+	newInstall bool
+
 	mu      sync.Mutex
 	creds   *Credentials
 	onEvent func(Event) error
@@ -139,9 +145,27 @@ func New(cfg Config) (*Addon, error) {
 	if a.cfg.Logf == nil {
 		a.cfg.Logf = log.Printf
 	}
-	if creds, err := a.load(); err != nil {
+	fresh, err := a.checkClaim()
+	if err != nil {
 		return nil, err
-	} else if creds != nil {
+	}
+	a.newInstall = fresh
+	creds, err := a.load()
+	if err != nil {
+		return nil, err
+	}
+	if creds != nil && fresh {
+		// The earlier install's registration: the panel that gave this
+		// claim code holds none for this addon (it would not have issued
+		// one), so the credentials are another registration's, and kept
+		// they would refuse the new one as "already registered".
+		if err := os.Remove(filepath.Join(a.cfg.DataDir, credentialsFile)); err != nil {
+			return nil, err
+		}
+		a.cfg.Logf("nexora: a new install (another claim code): the earlier registration with %s is dropped", creds.Panel.URL)
+		creds = nil
+	}
+	if creds != nil {
 		a.creds = creds
 		return a, nil
 	}
@@ -158,6 +182,20 @@ func New(cfg Config) (*Addon, error) {
 
 // Manifest is the parsed manifest.
 func (a *Addon) Manifest() manifest.Manifest { return a.manifest }
+
+// NewInstall is whether this run was given a claim code other than the one
+// the addon was registered with: a new install over the data an earlier one
+// left (removed without purging, then installed again). The earlier
+// registration is dropped, so the new one can be made; the addon should
+// apply the install's answers it otherwise uses only once, such as its
+// first admin's password. It stays so until the new install registers. An
+// update or a restart keeps the claim code, so it is never one; nor is the
+// first run, or the first run of this kit over data an older one wrote.
+func (a *Addon) NewInstall() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.newInstall
+}
 
 // ClaimCode is the code the panel must present, "" once registered.
 func (a *Addon) ClaimCode() string {
@@ -269,6 +307,10 @@ func (a *Addon) handleSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.creds = creds
+	a.newInstall = false
+	if err := a.recordClaim(); err != nil {
+		a.cfg.Logf("nexora: keeping the claim code's record failed: %v", err)
+	}
 	onSetup := a.onSetup
 	a.mu.Unlock()
 	a.cfg.Logf("nexora: registered with %s (panel %s)", creds.Panel.URL, creds.Panel.Version)
@@ -387,6 +429,46 @@ func (a *Addon) finishDelivery(id string, taken bool) {
 }
 
 const credentialsFile = "nexora-credentials.json"
+
+// claimFile keeps a hash of the claim code the addon was registered with.
+const claimFile = "nexora-claim"
+
+// checkClaim reports whether the claim code this run was given differs
+// from the one recorded: a new install. The record is the claim code the
+// addon was last registered with (recordClaim); with none — the first run,
+// or data an older kit wrote — this run's is recorded, and it is not one.
+// Until the new install registers, every run is it: a restart before then
+// still drops nothing it should keep and applies the same answers again.
+func (a *Addon) checkClaim() (bool, error) {
+	if a.cfg.ClaimCode == "" || a.cfg.DataDir == "" {
+		return false, nil
+	}
+	prev, err := os.ReadFile(filepath.Join(a.cfg.DataDir, claimFile))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	was := strings.TrimSpace(string(prev))
+	if was == "" {
+		return false, a.recordClaim()
+	}
+	return was != claimHash(a.cfg.ClaimCode), nil
+}
+
+// recordClaim keeps a hash of the claim code the install gave.
+func (a *Addon) recordClaim() error {
+	if a.cfg.ClaimCode == "" || a.cfg.DataDir == "" {
+		return nil
+	}
+	if err := os.MkdirAll(a.cfg.DataDir, 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(a.cfg.DataDir, claimFile), []byte(claimHash(a.cfg.ClaimCode)+"\n"), 0o600)
+}
+
+func claimHash(code string) string {
+	sum := sha256.Sum256([]byte(code))
+	return hex.EncodeToString(sum[:])
+}
 
 func (a *Addon) load() (*Credentials, error) {
 	if a.cfg.DataDir == "" {
