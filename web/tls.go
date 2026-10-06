@@ -31,11 +31,21 @@ import (
 const (
 	// HTTPSOff serves plain HTTP only; a reverse proxy in front may add TLS.
 	HTTPSOff = "off"
+	// HTTPSPanel serves the certificate the panel holds for the addon,
+	// fetched from it (TLS.Panel) and kept in <Dir>/tls-panel so a restart
+	// while the panel is down still serves it. The panel issues and renews
+	// it; the addon needs no ACME and no port 443 of its own, so several
+	// addons share one host, the panel's included.
+	HTTPSPanel = "panel"
 	// HTTPSACME gets the public address's certificate from an ACME CA (Let's
 	// Encrypt by default) by TLS-ALPN-01, answered on the HTTPS port itself,
 	// so nothing listens on 80; the CA asks on 443, whatever port the
 	// address names.
 	HTTPSACME = "acme"
+	// HTTPSACMEHTTP is HTTPSACME answering the CA's HTTP-01 check on port 80
+	// (TLS.HTTPListen) as well, for a host whose 443 something else holds;
+	// for an addon on a server of its own, never beside the panel.
+	HTTPSACMEHTTP = "acme-http"
 	// HTTPSSelfSigned makes a certificate of its own for the public
 	// address's host — an IP or a domain — for an install without a domain
 	// a CA would sign. Browsers warn; the traffic is encrypted, and the
@@ -44,7 +54,7 @@ const (
 )
 
 // HTTPSModes are the answers an `https` option offers.
-var HTTPSModes = []string{HTTPSOff, HTTPSACME, HTTPSSelfSigned}
+var HTTPSModes = []string{HTTPSOff, HTTPSPanel, HTTPSACME, HTTPSACMEHTTP, HTTPSSelfSigned}
 
 // selfSignedLife is how long a self-signed certificate is made for: within
 // the 398 days browsers and Apple's platforms accept, renewed 30 days before
@@ -66,9 +76,21 @@ type TLS struct {
 	// test CA whose own certificate nobody trusts.
 	ACMEDirectory string
 	ACMEInsecure  bool
+	// HTTPListen is where HTTPSACMEHTTP answers the CA's HTTP-01 check;
+	// empty is ":80".
+	HTTPListen string
+	// Panel is where an HTTPSPanel certificate comes from: the addon's link
+	// to its panel (*addon.Addon is one). Required in that mode.
+	Panel CertSource
+	// PanelRefresh is how often the panel is asked for a newer certificate
+	// once one is held; zero is every five minutes. An unchanged one costs
+	// a 304.
+	PanelRefresh time.Duration
 
-	once sync.Once
-	self *selfSigned
+	once    sync.Once
+	self    *selfSigned
+	panel   *panelCert
+	manager *autocert.Manager
 }
 
 // HostOf is an address's host in lower case, "" for one that is not an
@@ -87,11 +109,25 @@ func (t *TLS) Config() (*tls.Config, error) {
 		return nil, errors.New("web: TLS needs the public address's host")
 	}
 	switch t.Mode {
-	case HTTPSACME:
+	case HTTPSPanel:
+		if t.Panel == nil {
+			return nil, errors.New("web: https panel needs the addon's link to its panel (TLS.Panel)")
+		}
+		p := t.panelCert()
+		return &tls.Config{
+			MinVersion:     tls.VersionTLS12,
+			GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return p.current() },
+		}, nil
+	case HTTPSACME, HTTPSACMEHTTP:
 		m := &autocert.Manager{
 			Prompt: autocert.AcceptTOS,
 			Cache:  autocert.DirCache(filepath.Join(t.Dir, "acme")),
 			HostPolicy: func(_ context.Context, host string) error {
+				// The HTTP-01 check asks with a Host header, which names
+				// the port when it is not 80.
+				if h, _, err := net.SplitHostPort(host); err == nil {
+					host = h
+				}
 				want := t.Host()
 				if want == "" || net.ParseIP(want) != nil {
 					return errors.New("acme: the public address has no domain for a CA to sign; choose a self-signed certificate for an address by IP")
@@ -109,6 +145,7 @@ func (t *TLS) Config() (*tls.Config, error) {
 			}
 			m.Client = &acme.Client{DirectoryURL: t.ACMEDirectory, HTTPClient: hc}
 		}
+		t.manager = m
 		return m.TLSConfig(), nil
 	case HTTPSSelfSigned:
 		s := t.selfSigned()
@@ -141,6 +178,14 @@ func (t *TLS) Serve(ctx context.Context, addr string, h http.Handler) error {
 		defer cancel()
 		_ = srv.Shutdown(sctx)
 	}()
+	switch t.Mode {
+	case HTTPSPanel:
+		go t.panelCert().run(ctx, t.PanelRefresh)
+	case HTTPSACMEHTTP:
+		if err := t.serveHTTP01(ctx); err != nil {
+			return err
+		}
+	}
 	log.Printf("https on %s for the public address (%s)", addr, t.Mode)
 	if err := srv.ListenAndServeTLS("", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
@@ -148,14 +193,65 @@ func (t *TLS) Serve(ctx context.Context, addr string, h http.Handler) error {
 	return nil
 }
 
-// Fingerprint is the SHA-256 of the self-signed certificate served now, as
-// colon-separated hex — what an admin compares with the browser's — or ""
-// in another mode or before there is one.
+// serveHTTP01 answers the CA's HTTP-01 check on HTTPListen, and sends any
+// other request there to https.
+func (t *TLS) serveHTTP01(ctx context.Context) error {
+	addr := t.HTTPListen
+	if addr == "" {
+		addr = ":80"
+	}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("the CA's HTTP-01 check needs %s: %w", addr, err)
+	}
+	srv := &http.Server{Handler: t.manager.HTTPHandler(nil), ReadHeaderTimeout: 10 * time.Second}
+	go func() {
+		<-ctx.Done()
+		_ = srv.Close()
+	}()
+	go func() { _ = srv.Serve(ln) }()
+	log.Printf("http on %s for the CA's HTTP-01 check", addr)
+	return nil
+}
+
+// SelfSigned is whether the certificate served is one no public CA vouches
+// for — the self-signed mode, or a self-signed certificate from the panel —
+// so a check of the public address can look only at what answers, and a
+// browser warns.
+func (t *TLS) SelfSigned() bool {
+	switch t.Mode {
+	case HTTPSSelfSigned:
+		return true
+	case HTTPSPanel:
+		c, err := t.panelCert().current()
+		if err != nil || c.Leaf == nil {
+			return false
+		}
+		host := ""
+		if t.Host != nil {
+			host = t.Host()
+		}
+		_, err = c.Leaf.Verify(x509.VerifyOptions{DNSName: host})
+		return err != nil
+	}
+	return false
+}
+
+// Fingerprint is the SHA-256 of the self-signed certificate served now —
+// its own, or one from the panel — as colon-separated hex, what an admin
+// compares with the browser's; "" for a certificate a CA vouches for, or
+// before there is one.
 func (t *TLS) Fingerprint() string {
-	if t.Mode != HTTPSSelfSigned || t.Host == nil {
+	var c *tls.Certificate
+	var err error
+	switch {
+	case t.Mode == HTTPSSelfSigned && t.Host != nil:
+		c, err = t.selfSigned().current(t.Host())
+	case t.Mode == HTTPSPanel && t.SelfSigned():
+		c, err = t.panelCert().current()
+	default:
 		return ""
 	}
-	c, err := t.selfSigned().current(t.Host())
 	if err != nil || len(c.Certificate) == 0 {
 		return ""
 	}
@@ -168,8 +264,18 @@ func (t *TLS) Fingerprint() string {
 }
 
 func (t *TLS) selfSigned() *selfSigned {
-	t.once.Do(func() { t.self = &selfSigned{dir: filepath.Join(t.Dir, "tls")} })
+	t.once.Do(t.init)
 	return t.self
+}
+
+func (t *TLS) panelCert() *panelCert {
+	t.once.Do(t.init)
+	return t.panel
+}
+
+func (t *TLS) init() {
+	t.self = &selfSigned{dir: filepath.Join(t.Dir, "tls")}
+	t.panel = &panelCert{src: t.Panel, dir: filepath.Join(t.Dir, "tls-panel")}
 }
 
 // selfSigned keeps one certificate for the public host on disk, made anew
