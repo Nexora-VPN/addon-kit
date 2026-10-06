@@ -119,3 +119,51 @@ func TestTheHTTP01CheckMayNameAPort(t *testing.T) {
 		}
 	}
 }
+
+// TestACertificateACASignsThroughAnIntermediateIsNotSelfSigned: a public CA
+// signs through an intermediate the panel hands out with the leaf; the
+// check uses it, so such a certificate is not taken for a self-signed one.
+func TestACertificateACASignsThroughAnIntermediateIsNotSelfSigned(t *testing.T) {
+	issue := func(tmpl, parent *x509.Certificate, pub *ecdsa.PublicKey, signer *ecdsa.PrivateKey) *x509.Certificate {
+		t.Helper()
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, parent, pub, signer)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c, err := x509.ParseCertificate(der)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	ca := func(n int64, name string) *x509.Certificate {
+		return &x509.Certificate{
+			SerialNumber: big.NewInt(n), Subject: pkix.Name{CommonName: name},
+			NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+			IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign,
+		}
+	}
+	rootKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	interKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	leafKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	root := issue(ca(1, "root"), ca(1, "root"), &rootKey.PublicKey, rootKey)
+	inter := issue(ca(2, "intermediate"), root, &interKey.PublicKey, rootKey)
+	leaf := issue(&x509.Certificate{
+		SerialNumber: big.NewInt(3), Subject: pkix.Name{CommonName: "shop.example"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour), DNSNames: []string{"shop.example"},
+	}, inter, &leafKey.PublicKey, interKey)
+	roots := x509.NewCertPool()
+	roots.AddCert(root)
+
+	chain := &tls.Certificate{Certificate: [][]byte{leaf.Raw, inter.Raw}, Leaf: leaf}
+	if !vouched(chain, "shop.example", roots) {
+		t.Fatal("a leaf served with its intermediate was not vouched for")
+	}
+	bare := &tls.Certificate{Certificate: [][]byte{leaf.Raw}, Leaf: leaf}
+	if vouched(bare, "shop.example", roots) {
+		t.Fatal("a leaf without its intermediate was vouched for")
+	}
+	if vouched(chain, "other.example", roots) {
+		t.Fatal("a leaf was vouched for at a name it does not hold")
+	}
+}

@@ -160,7 +160,8 @@ func (t *TLS) Config() (*tls.Config, error) {
 	return nil, fmt.Errorf("web: %q is not an HTTPS mode (%s)", t.Mode, strings.Join(HTTPSModes[1:], ", "))
 }
 
-// Serve serves h over TLS on addr until ctx ends.
+// Serve serves h over TLS on addr until ctx ends, then lets the requests
+// in hand finish, for up to 10 seconds, before it returns.
 func (t *TLS) Serve(ctx context.Context, addr string, h http.Handler) error {
 	cfg, err := t.Config()
 	if err != nil {
@@ -173,7 +174,9 @@ func (t *TLS) Serve(ctx context.Context, addr string, h http.Handler) error {
 		Addr: addr, Handler: h, TLSConfig: cfg,
 		ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 2 * time.Minute, IdleTimeout: 2 * time.Minute,
 	}
+	shutDown := make(chan struct{})
 	go func() {
+		defer close(shutDown)
 		<-ctx.Done()
 		sctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -183,7 +186,7 @@ func (t *TLS) Serve(ctx context.Context, addr string, h http.Handler) error {
 	case HTTPSPanel:
 		go t.panelCert().run(ctx, t.PanelRefresh)
 	case HTTPSACMEHTTP:
-		if err := t.serveHTTP01(ctx); err != nil {
+		if err := t.serveHTTP01(ctx, addr); err != nil {
 			return err
 		}
 	}
@@ -191,12 +194,16 @@ func (t *TLS) Serve(ctx context.Context, addr string, h http.Handler) error {
 	if err := srv.ListenAndServeTLS("", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
+	// ListenAndServeTLS returns as Shutdown begins; the requests in hand
+	// end when it does.
+	<-shutDown
 	return nil
 }
 
 // serveHTTP01 answers the CA's HTTP-01 check on HTTPListen, and sends any
-// other request there to https.
-func (t *TLS) serveHTTP01(ctx context.Context) error {
+// other request there to https on httpsAddr's port — the addon's own, not
+// 443, which acme-http leaves to whatever holds it.
+func (t *TLS) serveHTTP01(ctx context.Context, httpsAddr string) error {
 	addr := t.HTTPListen
 	if addr == "" {
 		addr = ":80"
@@ -205,7 +212,7 @@ func (t *TLS) serveHTTP01(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("the CA's HTTP-01 check needs %s: %w", addr, err)
 	}
-	srv := &http.Server{Handler: t.manager.HTTPHandler(nil), ReadHeaderTimeout: 10 * time.Second}
+	srv := &http.Server{Handler: t.manager.HTTPHandler(httpsRedirect(httpsAddr)), ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		<-ctx.Done()
 		_ = srv.Close()
@@ -232,10 +239,26 @@ func (t *TLS) SelfSigned() bool {
 		if t.Host != nil {
 			host = t.Host()
 		}
-		_, err = c.Leaf.Verify(x509.VerifyOptions{DNSName: host})
-		return err != nil
+		return !vouched(c, host, nil)
 	}
 	return false
+}
+
+// vouched is whether a CA in roots (nil: the system's) vouches for c's leaf
+// at host, through the chain c carries — a public CA signs through an
+// intermediate, and Go fetches none that is missing.
+func vouched(c *tls.Certificate, host string, roots *x509.CertPool) bool {
+	if c.Leaf == nil || len(c.Certificate) == 0 {
+		return false
+	}
+	inter := x509.NewCertPool()
+	for _, der := range c.Certificate[1:] {
+		if ic, err := x509.ParseCertificate(der); err == nil {
+			inter.AddCert(ic)
+		}
+	}
+	_, err := c.Leaf.Verify(x509.VerifyOptions{DNSName: host, Intermediates: inter, Roots: roots})
+	return err == nil
 }
 
 // Fingerprint is the SHA-256 of the self-signed certificate served now —
@@ -381,4 +404,28 @@ func (s *selfSigned) make(host string) error {
 	s.leaf = leaf
 	log.Printf("https: a self-signed certificate made for %s, until %s", host, leaf.NotAfter.Format("2006-01-02"))
 	return nil
+}
+
+// httpsRedirect sends a plain request to the same host and path over https
+// on httpsAddr's port; none, or 443, is https's own.
+func httpsRedirect(httpsAddr string) http.Handler {
+	_, port, _ := net.SplitHostPort(httpsAddr)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			http.Error(w, "use https", http.StatusBadRequest)
+			return
+		}
+		host := r.Host
+		if h, _, err := net.SplitHostPort(host); err == nil {
+			host = h
+		}
+		host = strings.Trim(host, "[]")
+		if strings.Contains(host, ":") {
+			host = "[" + host + "]"
+		}
+		if port != "" && port != "443" {
+			host += ":" + port
+		}
+		http.Redirect(w, r, "https://"+host+r.URL.RequestURI(), http.StatusFound)
+	})
 }

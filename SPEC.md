@@ -118,14 +118,18 @@ JSON spelling.
 A **`password`** is a `secret` that becomes the addon's admin password: at
 least 10 characters and at most 72 bytes, the rule the kit's sign-in
 (`auth`) holds a password to, so the panel refuses a shorter one in its form
-instead of the addon refusing it once installed.
+instead of the addon refusing it once installed. A panel older than the type
+(before kit v0.4.2, panel 0.0.3) refuses such a manifest outright, as it
+does a `path` — set `requires.panel` (`>=0.0.3`) all the same.
 
 A new claim code over the data of an earlier install — the addon removed
 without its data, then installed again — is a **new install**: the kit
 drops the earlier registration it kept, so the panel that issued the code
 can register the addon, and `Addon.NewInstall` tells the addon to apply the
-answers it otherwise uses only once (its first admin's password). An update
-or a restart keeps the claim code.
+answers it otherwise uses only once (its first admin's password); once
+they are stored the addon calls `Addon.NewInstallApplied`, and a restart —
+before the new install registers or after — is not a new install again. An
+update keeps the claim code.
 
 A **`path`** is the base path the addon serves its admin under: one segment
 of letters, digits, `-` and `_` (at most 64), with or without slashes, or

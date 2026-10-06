@@ -107,9 +107,18 @@ func TestANewClaimCodeIsANewInstall(t *testing.T) {
 	if !fresh.NewInstall() || fresh.Credentials() != nil || fresh.ClaimCode() != "CODE-2" {
 		t.Fatalf("another code: new=%v, credentials %v, claim %q", fresh.NewInstall(), fresh.Credentials(), fresh.ClaimCode())
 	}
-	// A restart before it registers is still the new install.
-	if again := open("CODE-2"); !again.NewInstall() || again.Credentials() != nil {
-		t.Fatalf("restarted before registering: new=%v, credentials %v", again.NewInstall(), again.Credentials())
+	// A restart before the addon applied it is still the new install.
+	again := open("CODE-2")
+	if !again.NewInstall() || again.Credentials() != nil {
+		t.Fatalf("restarted before applying: new=%v, credentials %v", again.NewInstall(), again.Credentials())
+	}
+	// Applied, a restart before it registers is not: what the admin
+	// changed since stays; it still registers by the new code.
+	if err := again.NewInstallApplied(); err != nil || again.NewInstall() {
+		t.Fatalf("applied: %v, new=%v", err, again.NewInstall())
+	}
+	if again := open("CODE-2"); again.NewInstall() || again.Credentials() != nil || again.ClaimCode() != "CODE-2" {
+		t.Fatalf("restarted before registering: new=%v, credentials %v, claim %q", again.NewInstall(), again.Credentials(), again.ClaimCode())
 	}
 	mux := http.NewServeMux()
 	fresh.Mount(mux)

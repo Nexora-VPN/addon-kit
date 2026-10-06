@@ -6,10 +6,12 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nexora-vpn/addon-kit/web"
 )
@@ -272,5 +274,55 @@ func TestRelativeAndEscapedRedirectsKeepTheBase(t *testing.T) {
 		if code, _, loc := get(t, h, path); code < 300 || code >= 400 || loc != want {
 			t.Errorf("%s = %d %q, want a redirect to %s", path, code, loc, want)
 		}
+	}
+}
+
+// TestServeLetsTheRequestsInHandFinish: Serve returns only once a request
+// running when ctx ends has had its answer.
+func TestServeLetsTheRequestsInHandFinish(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+	started := make(chan struct{})
+	h := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		close(started)
+		time.Sleep(400 * time.Millisecond)
+		_, _ = io.WriteString(w, "done")
+	})
+	tl := &web.TLS{Mode: web.HTTPSSelfSigned, Host: func() string { return "127.0.0.1" }, Dir: t.TempDir()}
+	ctx, cancel := context.WithCancel(context.Background())
+	served := make(chan error, 1)
+	go func() { served <- tl.Serve(ctx, addr, h) }()
+	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}} //nolint:gosec // a test server's own certificate
+	got := make(chan string, 1)
+	go func() {
+		for range 50 {
+			resp, err := client.Get("https://" + addr)
+			if err != nil {
+				time.Sleep(20 * time.Millisecond)
+				continue
+			}
+			b, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			got <- string(b)
+			return
+		}
+		got <- "unreachable"
+	}()
+	<-started
+	cancel()
+	select {
+	case err := <-served:
+		t.Fatalf("Serve returned (%v) before the request in hand finished", err)
+	case body := <-got:
+		if body != "done" {
+			t.Fatalf("the request in hand got %q", body)
+		}
+	}
+	if err := <-served; err != nil {
+		t.Fatal(err)
 	}
 }

@@ -122,8 +122,8 @@ type Addon struct {
 	claim    string
 
 	// newInstall is whether this run was given another claim code than the
-	// one the addon was registered with: a new install over an earlier
-	// one's data.
+	// one the addon was registered with, not applied yet: a new install
+	// over an earlier one's data.
 	newInstall bool
 
 	mu      sync.Mutex
@@ -188,13 +188,32 @@ func (a *Addon) Manifest() manifest.Manifest { return a.manifest }
 // left (removed without purging, then installed again). The earlier
 // registration is dropped, so the new one can be made; the addon should
 // apply the install's answers it otherwise uses only once, such as its
-// first admin's password. It stays so until the new install registers. An
-// update or a restart keeps the claim code, so it is never one; nor is the
-// first run, or the first run of this kit over data an older one wrote.
+// first admin's password, then call NewInstallApplied. It stays so until
+// then, or until the new install registers: a restart after either is not a
+// new install again, which would undo what the admin did since. An update
+// keeps the claim code, so it is never one; nor is the first run, or the
+// first run of this kit over data an older one wrote.
 func (a *Addon) NewInstall() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.newInstall
+}
+
+// NewInstallApplied records that the addon applied a new install's answers
+// (NewInstall): the claim code is kept as this install's, so the next start
+// is not a new install. Call it only once they are stored — a start that
+// stops before keeps the new install for the next.
+func (a *Addon) NewInstallApplied() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.newInstall {
+		return nil
+	}
+	if err := a.recordClaim(); err != nil {
+		return err
+	}
+	a.newInstall = false
+	return nil
 }
 
 // ClaimCode is the code the panel must present, "" once registered.
